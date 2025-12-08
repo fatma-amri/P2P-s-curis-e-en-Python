@@ -11,6 +11,8 @@ from crypto_handler import CryptoHandler
 HEADER_SIZE = 8 # 4 bytes type + 4 bytes size
 MAX_FILE_SIZE = 10 * 1024 * 1024 # 10 MB
 RECV_BUFFER_SIZE = 4096
+RECV_SOCKET_TIMEOUT = 30  # 30 seconds timeout for recv operations
+RECV_TOTAL_TIMEOUT = 60  # 60 seconds total timeout for _recv_all
 
 class NetworkHandler:
     """
@@ -63,11 +65,19 @@ class NetworkHandler:
             try:
                 self.server_socket.settimeout(1) # Timeout pour permettre l'arrêt propre
                 conn, addr = self.server_socket.accept()
+                
+                # Set timeout on peer socket
+                conn.settimeout(RECV_SOCKET_TIMEOUT)
+                
                 self.logger.log(f"Connexion entrante de {addr[0]}:{addr[1]}", "INFO")
                 
                 # N'accepter qu'une seule connexion P2P
                 if self.is_connected:
                     self.logger.log("Connexion rejetée: une connexion est déjà active.", "WARNING")
+                    try:
+                        conn.shutdown(socket.SHUT_RDWR)
+                    except:
+                        pass
                     conn.close()
                     continue
 
@@ -102,6 +112,7 @@ class NetworkHandler:
         
         try:
             self.peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.peer_socket.settimeout(RECV_SOCKET_TIMEOUT)
             self.peer_socket.connect((ip, port))
             self.peer_addr = (ip, port)
             self.is_connected = True
@@ -190,13 +201,30 @@ class NetworkHandler:
             return False
 
     def _recv_all(self, conn, n):
-        """Reçoit exactement n octets du socket."""
+        """Reçoit exactement n octets du socket avec timeout global."""
+        import time
         data = b''
+        start_time = time.time()
+        
         while len(data) < n:
-            packet = conn.recv(n - len(data))
-            if not packet:
+            # Check global timeout
+            if time.time() - start_time > RECV_TOTAL_TIMEOUT:
+                self.logger.log(f"Timeout global lors de la réception de {n} octets", "ERROR")
                 return None
-            data += packet
+            
+            try:
+                remaining = n - len(data)
+                packet = conn.recv(min(remaining, RECV_BUFFER_SIZE))
+                if not packet:
+                    return None
+                data += packet
+            except socket.timeout:
+                self.logger.log(f"Timeout socket lors de la réception", "WARNING")
+                return None
+            except Exception as e:
+                self.logger.log(f"Erreur lors de la réception: {e}", "ERROR")
+                return None
+        
         return data
 
     def _receive_loop(self, conn):
@@ -210,14 +238,26 @@ class NetworkHandler:
                     break
                 
                 msg_type, msg_size = struct.unpack('!II', header_data)
-
-                # 2. Réception du corps du message
-                encrypted_body = self._recv_all(conn, msg_size)
-                if not encrypted_body:
-                    self.logger.log("Connexion fermée par le pair pendant la réception du corps.", "INFO")
+                
+                # 2. Valider la taille du message
+                if msg_size > MessageType.MAX_MESSAGE_SIZE:
+                    self.logger.log(f"Taille de message invalide: {msg_size} > {MessageType.MAX_MESSAGE_SIZE}", "ERROR")
                     break
+                
+                if msg_size == 0:
+                    # Seul FILE_END peut avoir une taille de 0
+                    if msg_type != MessageType.FILE_END:
+                        self.logger.log(f"Taille de message nulle reçue pour type {msg_type}", "WARNING")
+                        break
+                    encrypted_body = b''
+                else:
+                    # 3. Réception du corps du message
+                    encrypted_body = self._recv_all(conn, msg_size)
+                    if not encrypted_body:
+                        self.logger.log("Connexion fermée par le pair pendant la réception du corps.", "INFO")
+                        break
 
-                # 3. Traitement du message
+                # 4. Traitement du message
                 self._process_message(msg_type, encrypted_body)
 
             except socket.timeout:
@@ -303,6 +343,10 @@ class NetworkHandler:
                 self.server_socket = None
             
             if self.peer_socket:
+                try:
+                    self.peer_socket.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
                 try:
                     self.peer_socket.close()
                 except Exception:

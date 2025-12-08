@@ -5,6 +5,8 @@ from tkinter import scrolledtext, simpledialog, filedialog, messagebox
 import threading
 import os
 import time
+import re
+from logger import MessageType
 
 # Définition des couleurs pour l'interface
 COLOR_PRIMARY = "#4CAF50"  # Vert pour les boutons
@@ -103,10 +105,17 @@ class ChatApp(tk.Tk):
         # self.network.message_callback = self.display_message
         # self.network.file_transfer_handler.gui_callback = self.handle_file_transfer_request
         # self.network.logger.set_callback(self.display_log)
+        
+        # Event pour synchroniser le dialogue modal de transfert de fichier
+        self.file_transfer_event = None
+        self.file_transfer_result = None
 
         self.display_log("Application démarrée. Génération/Chargement des clés cryptographiques effectuée.", "INFO")
         self.display_log(f"Votre Fingerprint (Ed25519) est: {self.crypto.get_fingerprint()}", "SYSTEM")
         self.display_log("Veuillez démarrer l'écoute ou vous connecter à un pair.", "INFO")
+        
+        # Mettre à jour l'état initial de l'UI
+        self._update_ui_state()
         
         # Gestion de la fermeture de la fenêtre
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -169,6 +178,31 @@ class ChatApp(tk.Tk):
             self.status_label.config(fg=COLOR_ERROR)
         else:
             self.status_label.config(fg=COLOR_TEXT)
+        
+        # Mettre à jour l'état de l'UI après un changement de statut
+        self._update_ui_state()
+    
+    def _update_ui_state(self):
+        """Met à jour l'état des boutons en fonction de l'état de connexion."""
+        is_connected = self.network and self.network.is_connected
+        has_session = self.crypto and self.crypto.is_session_active()
+        is_listening = self.network and self.network.is_listening
+        
+        # Les boutons d'envoi sont activés uniquement si connecté avec session active
+        if is_connected and has_session:
+            self.send_button.config(state='normal')
+            self.file_button.config(state='normal')
+        else:
+            self.send_button.config(state='disabled')
+            self.file_button.config(state='disabled')
+        
+        # Les boutons de connexion sont désactivés si déjà connecté ou en écoute
+        if is_connected or is_listening:
+            self.listen_button.config(state='disabled')
+            self.connect_button.config(state='disabled')
+        else:
+            self.listen_button.config(state='normal')
+            self.connect_button.config(state='normal')
 
     # --- Dialogues et Actions ---
 
@@ -184,12 +218,52 @@ class ChatApp(tk.Tk):
         ip_port = simpledialog.askstring("Se connecter", "Entrez IP:Port du pair (ex: 127.0.0.1:5000):", parent=self)
         if ip_port:
             try:
-                ip, port_str = ip_port.split(':')
-                port = int(port_str)
+                # Valider le format IP:Port
+                if ':' not in ip_port:
+                    messagebox.showerror("Erreur de connexion", "Format IP:Port invalide. Format attendu: IP:Port")
+                    return
+                
+                parts = ip_port.split(':')
+                if len(parts) != 2:
+                    messagebox.showerror("Erreur de connexion", "Format IP:Port invalide. Format attendu: IP:Port")
+                    return
+                
+                ip, port_str = parts
+                
+                # Valider l'adresse IP (simple regex)
+                ip_pattern = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
+                if not ip_pattern.match(ip):
+                    messagebox.showerror("Erreur de connexion", "Adresse IP invalide.")
+                    return
+                
+                # Vérifier que chaque octet est dans [0, 255]
+                octets = ip.split('.')
+                try:
+                    for octet in octets:
+                        octet_val = int(octet)
+                        if not (0 <= octet_val <= 255):
+                            messagebox.showerror("Erreur de connexion", "Adresse IP invalide (octets doivent être entre 0 et 255).")
+                            return
+                except ValueError:
+                    messagebox.showerror("Erreur de connexion", "Adresse IP invalide (octets doivent être numériques).")
+                    return
+                
+                # Valider le port
+                try:
+                    port = int(port_str)
+                    if not (1 <= port <= 65535):
+                        messagebox.showerror("Erreur de connexion", "Port invalide (doit être entre 1 et 65535).")
+                        return
+                except ValueError:
+                    messagebox.showerror("Erreur de connexion", "Port invalide (doit être un nombre).")
+                    return
+                
                 # Exécuter l'opération réseau dans un thread séparé
                 threading.Thread(target=self.network.connect_to_peer, args=(ip, port), daemon=True).start()
             except ValueError:
                 messagebox.showerror("Erreur de connexion", "Format IP:Port invalide.")
+            except Exception as e:
+                messagebox.showerror("Erreur de connexion", f"Erreur: {e}")
 
     def send_message(self):
         """Envoie le message saisi dans le champ de saisie."""
@@ -229,44 +303,52 @@ class ChatApp(tk.Tk):
             # Demande de confirmation et de chemin de sauvegarde
             file_size_mb = size_or_path / (1024 * 1024)
             
-            # Utiliser after pour exécuter la boîte de dialogue dans le thread principal
-            # On utilise un conteneur pour stocker le résultat de la boîte de dialogue modale
-            result_container = {"path": None}
+            # Utiliser un Event pour synchroniser avec le thread de l'UI
+            self.file_transfer_event = threading.Event()
+            self.file_transfer_result = None
             
-            def ask_and_store():
-                result_container["path"] = self._ask_save_path(filename, file_size_mb)
+            # Programmer l'affichage du dialogue dans le thread principal
+            self.after(0, self._ask_save_path_async, filename, file_size_mb)
             
-            self.after(0, ask_and_store)
+            # Attendre avec timeout (30 secondes) que l'utilisateur réponde
+            event_set = self.file_transfer_event.wait(timeout=30.0)
             
-            # Attendre que le thread principal ait traité la boîte de dialogue
-            # C'est une solution de contournement pour les boîtes de dialogue modales
-            while result_container["path"] is None and not self.network.is_connected: # Ajouter une condition d'arrêt
-                time.sleep(0.1)
+            if not event_set:
+                # Timeout - l'utilisateur n'a pas répondu à temps
+                self.display_log("Timeout lors de la demande de transfert de fichier", "WARNING")
+                return None
             
-            return result_container["path"]
+            return self.file_transfer_result
 
         elif action == "file_end":
             # Notification de fin de transfert
             self.display_message(f"Fichier '{filename}' reçu et sauvegardé à: {size_or_path}", is_system=True)
             self.after(0, lambda: messagebox.showinfo("Transfert de fichier terminé", f"Fichier '{filename}' reçu avec succès.\nSauvegardé à: {size_or_path}"))
 
-    def _ask_save_path(self, filename, file_size_mb):
-        """Ouvre la boîte de dialogue de sauvegarde (doit être appelé dans le thread principal)."""
-        
-        # Afficher une boîte de dialogue de confirmation
-        confirm = messagebox.askyesno("Transfert de fichier entrant", 
-                                      f"Le pair souhaite vous envoyer le fichier '{filename}' ({file_size_mb:.2f} MB).\n\nVoulez-vous accepter le transfert et choisir un emplacement de sauvegarde ?")
-        
-        if confirm:
-            # Ouvrir la boîte de dialogue de sauvegarde
-            save_path = filedialog.asksaveasfilename(
-                title="Enregistrer le fichier reçu",
-                initialfile=filename,
-                defaultextension=".*",
-                parent=self
-            )
-            return save_path
-        else:
-            return None
+    def _ask_save_path_async(self, filename, file_size_mb):
+        """Affiche le dialogue de sauvegarde de façon asynchrone dans le thread UI."""
+        try:
+            # Afficher une boîte de dialogue de confirmation
+            confirm = messagebox.askyesno("Transfert de fichier entrant", 
+                                          f"Le pair souhaite vous envoyer le fichier '{filename}' ({file_size_mb:.2f} MB).\n\nVoulez-vous accepter le transfert et choisir un emplacement de sauvegarde ?")
+            
+            if confirm:
+                # Ouvrir la boîte de dialogue de sauvegarde
+                save_path = filedialog.asksaveasfilename(
+                    title="Enregistrer le fichier reçu",
+                    initialfile=filename,
+                    defaultextension=".*",
+                    parent=self
+                )
+                self.file_transfer_result = save_path if save_path else None
+            else:
+                self.file_transfer_result = None
+        except Exception as e:
+            self.display_log(f"Erreur lors du dialogue de transfert: {e}", "ERROR")
+            self.file_transfer_result = None
+        finally:
+            # Signaler que le résultat est disponible
+            if self.file_transfer_event:
+                self.file_transfer_event.set()
 
 # Le bloc if __name__ est retiré pour éviter l'exécution lors de l'importation.

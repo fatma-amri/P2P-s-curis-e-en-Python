@@ -16,7 +16,18 @@ class Logger:
         log_message = f"{timestamp} [{level}] {message}"
         
         if self.callback:
-            self.callback(log_message)
+            # Try to call with (message, level) for new callbacks, fall back to (log_message) for old ones
+            try:
+                # Check if callback accepts 2 parameters
+                import inspect
+                sig = inspect.signature(self.callback)
+                if len(sig.parameters) >= 2:
+                    self.callback(log_message, level)
+                else:
+                    self.callback(log_message)
+            except:
+                # Fallback to single parameter for backwards compatibility
+                self.callback(log_message)
         else:
             print(log_message)
 
