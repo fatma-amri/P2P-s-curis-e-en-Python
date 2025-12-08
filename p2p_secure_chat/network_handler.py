@@ -10,7 +10,9 @@ from .crypto_handler import CryptoHandler
 HEADER_SIZE = 8 # 4 bytes type + 4 bytes size
 MAX_FILE_SIZE = 10 * 1024 * 1024 # 10 MB
 RECV_BUFFER_SIZE = 4096
-RECV_SOCKET_TIMEOUT = 5.0  # seconds
+RECV_SOCKET_TIMEOUT = 5.0  # seconds - timeout for socket recv operations
+HANDSHAKE_TIMEOUT = 30.0  # seconds - longer timeout for handshake
+RECV_ALL_TIMEOUT_MULTIPLIER = 2  # multiplier for _recv_all operations
 
 class NetworkHandler:
     """
@@ -36,28 +38,68 @@ class NetworkHandler:
         self.rekey_counter = 0
         self.lock = threading.Lock()
 
-    def start_listening(self, port):
-        """Démarre le serveur TCP en mode écoute."""
+    def start_listening(self, port, allow_dynamic_port=False):
+        """Démarre le serveur TCP en mode écoute.
+        
+        Args:
+            port: Port sur lequel écouter
+            allow_dynamic_port: Si True, essaie des ports alternatifs en cas de conflit
+        
+        Returns:
+            Le port réellement utilisé, ou None en cas d'échec
+        """
         if self.is_listening or self.is_connected:
             self.logger.log("Le réseau est déjà actif.", "WARNING")
-            return
+            return None
 
-        try:
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind(('0.0.0.0', port))
-            self.server_socket.listen(1)
-            self.is_listening = True
-            if self.status_callback:
-                self.status_callback("Écoute sur le port " + str(port))
-            self.logger.log(f"Démarrage de l'écoute sur le port {port}...", "INFO")
-            
-            threading.Thread(target=self._listen_loop, daemon=True).start()
-        except Exception as e:
-            self.logger.log(f"Erreur lors du démarrage de l'écoute: {e}", "ERROR")
-            if self.status_callback:
-                self.status_callback("Erreur d'écoute")
-            self.close_connection()
+        # Essayer le port demandé d'abord, puis des ports alternatifs si permis
+        ports_to_try = [port]
+        if allow_dynamic_port:
+            # Essayer des ports dans une plage proche
+            ports_to_try.extend([port + i for i in range(1, 11)])
+        
+        last_error = None
+        for try_port in ports_to_try:
+            try:
+                self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self.server_socket.bind(('0.0.0.0', try_port))
+                self.server_socket.listen(1)
+                self.is_listening = True
+                if self.status_callback:
+                    self.status_callback("Écoute sur le port " + str(try_port))
+                self.logger.log(f"Démarrage de l'écoute sur le port {try_port}...", "INFO")
+                if try_port != port:
+                    self.logger.log(f"Note: Port original {port} non disponible, utilise {try_port} à la place.", "WARNING")
+                
+                threading.Thread(target=self._listen_loop, daemon=True).start()
+                return try_port
+                
+            except OSError as e:
+                last_error = e
+                if e.errno in (errno.EADDRINUSE, 48):  # 48 = Address already in use on some systems
+                    self.logger.log(f"Port {try_port} déjà utilisé, tentative suivante...", "DEBUG")
+                    if self.server_socket:
+                        try:
+                            self.server_socket.close()
+                        except:
+                            pass
+                        self.server_socket = None
+                    if not allow_dynamic_port:
+                        break
+                    continue
+                else:
+                    break
+            except Exception as e:
+                last_error = e
+                break
+        
+        # Si nous arrivons ici, toutes les tentatives ont échoué
+        self.logger.log(f"Erreur lors du démarrage de l'écoute: {last_error}", "ERROR")
+        if self.status_callback:
+            self.status_callback("Erreur d'écoute")
+        self.close_connection()
+        return None
 
     def _listen_loop(self):
         """Boucle d'écoute du serveur pour accepter les connexions entrantes."""
@@ -221,23 +263,39 @@ class NetworkHandler:
             self.logger.log(f"Erreur critique lors du handshake: {e}", "ERROR")
             return False
 
-    def _recv_all(self, conn, n):
-        """Reçoit exactement n octets du socket (avec timeout global de lecture)."""
+    def _recv_all(self, conn, n, timeout_multiplier=RECV_ALL_TIMEOUT_MULTIPLIER):
+        """Reçoit exactement n octets du socket (avec timeout global de lecture).
+        
+        Args:
+            conn: Socket de connexion
+            n: Nombre d'octets à recevoir
+            timeout_multiplier: Multiplicateur pour le timeout (pour les opérations plus longues)
+        
+        Returns:
+            Les données reçues ou None en cas d'échec
+        """
         data = b''
-        end_time = time.time() + (RECV_SOCKET_TIMEOUT * 2)
+        end_time = time.time() + (RECV_SOCKET_TIMEOUT * timeout_multiplier)
+        start_time = time.time()
+        
         while len(data) < n:
             remaining = n - len(data)
             try:
-                packet = conn.recv(remaining)
+                packet = conn.recv(min(remaining, RECV_BUFFER_SIZE))
             except socket.timeout:
                 if time.time() > end_time:
+                    self.logger.log(f"Timeout lors de la réception: reçu {len(data)}/{n} octets en {time.time() - start_time:.2f}s", "WARNING")
                     return None
                 continue
-            except Exception:
+            except Exception as e:
+                self.logger.log(f"Erreur lors de la réception: {e}", "ERROR")
                 return None
             if not packet:
+                self.logger.log(f"Connexion fermée: reçu {len(data)}/{n} octets", "DEBUG")
                 return None
             data += packet
+        
+        self.logger.log(f"Réception complète: {len(data)} octets en {time.time() - start_time:.2f}s", "DEBUG")
         return data
 
     def _receive_loop(self, conn):
