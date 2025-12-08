@@ -184,13 +184,16 @@ class CryptoHandler:
             
             # 4. Dériver la clé de session avec HKDF
             # Deriver un sel déterministe à partir des clés publiques Ed25519 (pair + local)
+            # Les clés doivent être triées pour garantir le même sel des deux côtés
             digest = hashes.Hash(hashes.SHA256())
             local_ed25519_pub = self.ed25519_private_key.public_key().public_bytes(
                 encoding=serialization.Encoding.Raw,
                 format=serialization.PublicFormat.Raw
             )
-            digest.update(peer_ed25519_pub_bytes)
-            digest.update(local_ed25519_pub)
+            # Trier les clés pour garantir un ordre déterministe
+            sorted_keys = sorted([peer_ed25519_pub_bytes, local_ed25519_pub])
+            digest.update(sorted_keys[0])
+            digest.update(sorted_keys[1])
             hkdf_salt = digest.finalize()
 
             hkdf = HKDF(
