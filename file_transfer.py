@@ -93,18 +93,50 @@ class FileTransferHandler:
                     save_path = self.gui_callback("file_start", filename, filesize)
                     
                     if save_path:
-                        self.receiving_file = {
-                            "name": filename,
-                            "size": filesize,
-                            "path": save_path,
-                            "received_bytes": 0,
-                            "file_handle": open(save_path, 'wb')
-                        }
-                        self.logger.log(f"Réception du fichier '{filename}' ({filesize} octets) démarrée. Sauvegarde dans {save_path}", "INFO")
+                        # Valider le chemin de sauvegarde
+                        try:
+                            # Convertir en chemin absolu
+                            save_path = os.path.abspath(save_path)
+                            
+                            # S'assurer que le répertoire parent existe
+                            save_dir = os.path.dirname(save_path)
+                            if not os.path.exists(save_dir):
+                                self.logger.log(f"Le répertoire {save_dir} n'existe pas.", "ERROR")
+                                self.receiving_file = None
+                                return
+                            
+                            # Utiliser basename du filename original pour éviter path traversal
+                            # si l'utilisateur n'a pas fourni un nom complet
+                            safe_filename = os.path.basename(filename)
+                            if not os.path.basename(save_path):
+                                # Si save_path est un répertoire, utiliser le nom de fichier sécurisé
+                                save_path = os.path.join(save_path, safe_filename)
+                            
+                            # Ouvrir le fichier pour l'écriture
+                            file_handle = open(save_path, 'wb')
+                            
+                            self.receiving_file = {
+                                "name": filename,
+                                "size": filesize,
+                                "path": save_path,
+                                "received_bytes": 0,
+                                "file_handle": file_handle
+                            }
+                            self.logger.log(f"Réception du fichier '{filename}' ({filesize} octets) démarrée. Sauvegarde dans {save_path}", "INFO")
+                        
+                        except IOError as e:
+                            self.logger.log(f"Erreur d'ouverture du fichier {save_path}: {e}", "ERROR")
+                            self.receiving_file = None
+                        except Exception as e:
+                            self.logger.log(f"Erreur de validation du chemin: {e}", "ERROR")
+                            self.receiving_file = None
                     else:
                         self.logger.log(f"Réception du fichier '{filename}' annulée par l'utilisateur.", "WARNING")
                         self.receiving_file = None # Indique d'ignorer les chunks suivants
 
+                except json.JSONDecodeError as e:
+                    self.logger.log(f"Erreur de décodage JSON dans FILE_START: {e}", "ERROR")
+                    self.receiving_file = None
                 except Exception as e:
                     self.logger.log(f"Erreur lors du traitement de FILE_START: {e}", "ERROR")
                     self.receiving_file = None
@@ -118,10 +150,19 @@ class FileTransferHandler:
                     self.receiving_file["file_handle"].write(plaintext_body)
                     self.receiving_file["received_bytes"] += len(plaintext_body)
                     
+                    # Vérifier que nous ne dépassons pas la taille attendue
+                    if self.receiving_file["received_bytes"] > self.receiving_file["size"]:
+                        self.logger.log(f"Erreur: Taille reçue dépasse la taille attendue.", "ERROR")
+                        self._cleanup_receiving_file()
+                        return
+                    
                     # Mise à jour de la progression (optionnel, peut être géré par la GUI)
                     progress = (self.receiving_file["received_bytes"] / self.receiving_file["size"]) * 100
                     self.logger.log(f"Progression de la réception: {progress:.2f}%", "DEBUG")
 
+                except IOError as e:
+                    self.logger.log(f"Erreur d'écriture du chunk de fichier: {e}", "ERROR")
+                    self._cleanup_receiving_file()
                 except Exception as e:
                     self.logger.log(f"Erreur lors de l'écriture du chunk de fichier: {e}", "ERROR")
                     self._cleanup_receiving_file()
