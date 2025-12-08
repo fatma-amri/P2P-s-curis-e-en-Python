@@ -1,5 +1,3 @@
-# p2p_secure_chat/logger.py
-
 import datetime
 
 class Logger:
@@ -16,7 +14,12 @@ class Logger:
         log_message = f"{timestamp} [{level}] {message}"
         
         if self.callback:
-            self.callback(log_message)
+            # Passer le message et le niveau à la callback (ex: GUI attend (message, level))
+            try:
+                self.callback(log_message, level)
+            except TypeError:
+                # Compatibilité si la callback n'attend qu'un seul argument
+                self.callback(log_message)
         else:
             print(log_message)
 

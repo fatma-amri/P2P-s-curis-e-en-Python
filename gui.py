@@ -1,5 +1,3 @@
-# p2p_secure_chat/gui.py
-
 import tkinter as tk
 from tkinter import scrolledtext, simpledialog, filedialog, messagebox
 import threading
@@ -99,10 +97,6 @@ class ChatApp(tk.Tk):
 
         # Initialisation des callbacks pour les autres modules
         # Les callbacks seront définis dans main.py pour éviter les dépendances circulaires
-        # self.network.status_callback = self.update_status
-        # self.network.message_callback = self.display_message
-        # self.network.file_transfer_handler.gui_callback = self.handle_file_transfer_request
-        # self.network.logger.set_callback(self.display_log)
 
         self.display_log("Application démarrée. Génération/Chargement des clés cryptographiques effectuée.", "INFO")
         self.display_log(f"Votre Fingerprint (Ed25519) est: {self.crypto.get_fingerprint()}", "SYSTEM")
@@ -111,12 +105,19 @@ class ChatApp(tk.Tk):
         # Gestion de la fermeture de la fenêtre
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
+        # Désactiver certaines actions jusqu'à connexion
+        self._update_ui_state()
+
     # --- Méthodes de la GUI ---
 
     def on_closing(self):
         """Gère la fermeture de la fenêtre."""
         if messagebox.askokcancel("Quitter", "Voulez-vous vraiment quitter l'application ?"):
-            self.network.close_connection()
+            try:
+                if self.network:
+                    self.network.close_connection()
+            except Exception:
+                pass
             self.destroy()
 
     def display_log(self, message, level="INFO"):
@@ -169,6 +170,25 @@ class ChatApp(tk.Tk):
             self.status_label.config(fg=COLOR_ERROR)
         else:
             self.status_label.config(fg=COLOR_TEXT)
+        # Mettre à jour l'état des boutons en fonction
+        self._update_ui_state()
+
+    def _update_ui_state(self):
+        """Activer/désactiver des widgets selon l'état de la connexion/session."""
+        connected = getattr(self.network, "is_connected", False)
+        session_active = getattr(self.crypto, "is_session_active", lambda: False)()
+        # Envoi de fichier seulement si connecté et session active
+        if connected and session_active:
+            self.file_button.config(state='normal')
+        else:
+            self.file_button.config(state='disabled')
+        # Envoi de message si connecté et session active
+        if connected and session_active:
+            self.send_button.config(state='normal')
+            self.message_entry.config(state='normal')
+        else:
+            self.send_button.config(state='disabled')
+            self.message_entry.config(state='disabled')
 
     # --- Dialogues et Actions ---
 
@@ -186,7 +206,10 @@ class ChatApp(tk.Tk):
             try:
                 ip, port_str = ip_port.split(':')
                 port = int(port_str)
-                # Exécuter l'opération réseau dans un thread séparé
+                # Valider IP/Port minimalement
+                # (Format simple, la validation complète d'IP est laissée au socket.connect)
+                if port < 1 or port > 65535:
+                    raise ValueError("Port hors intervalle valide")
                 threading.Thread(target=self.network.connect_to_peer, args=(ip, port), daemon=True).start()
             except ValueError:
                 messagebox.showerror("Erreur de connexion", "Format IP:Port invalide.")
@@ -212,7 +235,7 @@ class ChatApp(tk.Tk):
 
     def send_file_dialog(self):
         """Ouvre une boîte de dialogue pour sélectionner un fichier à envoyer."""
-        if not self.network.is_connected or not self.crypto.is_session_active():
+        if not getattr(self.network, "is_connected", False) or not self.crypto.is_session_active():
             messagebox.showerror("Erreur", "Vous devez être connecté et avoir une session sécurisée active pour envoyer un fichier.")
             return
 
@@ -224,26 +247,28 @@ class ChatApp(tk.Tk):
     def handle_file_transfer_request(self, action, filename, size_or_path):
         """
         Callback appelé par FileTransferHandler pour gérer les requêtes de transfert.
+        Doit être thread-safe : appelé depuis le thread réseau.
         """
         if action == "file_start":
-            # Demande de confirmation et de chemin de sauvegarde
             file_size_mb = size_or_path / (1024 * 1024)
-            
-            # Utiliser after pour exécuter la boîte de dialogue dans le thread principal
-            # On utilise un conteneur pour stocker le résultat de la boîte de dialogue modale
             result_container = {"path": None}
-            
+            done_event = threading.Event()
+
             def ask_and_store():
-                result_container["path"] = self._ask_save_path(filename, file_size_mb)
-            
+                try:
+                    result_container["path"] = self._ask_save_path(filename, file_size_mb)
+                finally:
+                    done_event.set()
+
+            # Planifier l'exécution de la boîte de dialogue dans le thread Tk
             self.after(0, ask_and_store)
-            
-            # Attendre que le thread principal ait traité la boîte de dialogue
-            # C'est une solution de contournement pour les boîtes de dialogue modales
-            while result_container["path"] is None and not self.network.is_connected: # Ajouter une condition d'arrêt
-                time.sleep(0.1)
-            
-            return result_container["path"]
+
+            # Attendre la réponse avec un timeout raisonnable
+            if done_event.wait(timeout=300):  # 5 minutes max
+                return result_container["path"]
+            else:
+                # Timeout, considérer comme refus
+                return None
 
         elif action == "file_end":
             # Notification de fin de transfert
@@ -261,12 +286,10 @@ class ChatApp(tk.Tk):
             # Ouvrir la boîte de dialogue de sauvegarde
             save_path = filedialog.asksaveasfilename(
                 title="Enregistrer le fichier reçu",
-                initialfile=filename,
+                initialfile=os.path.basename(filename),
                 defaultextension=".*",
                 parent=self
             )
             return save_path
         else:
             return None
-
-# Le bloc if __name__ est retiré pour éviter l'exécution lors de l'importation.

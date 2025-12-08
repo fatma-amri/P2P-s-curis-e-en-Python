@@ -1,5 +1,3 @@
-# p2p_secure_chat/file_transfer.py
-
 import os
 import json
 import threading
@@ -89,18 +87,39 @@ class FileTransferHandler:
                         return
 
                     # Demander à la GUI où sauvegarder le fichier
-                    # La GUI doit retourner le chemin de sauvegarde complet ou None si annulé
                     save_path = self.gui_callback("file_start", filename, filesize)
                     
                     if save_path:
-                        self.receiving_file = {
-                            "name": filename,
-                            "size": filesize,
-                            "path": save_path,
-                            "received_bytes": 0,
-                            "file_handle": open(save_path, 'wb')
-                        }
-                        self.logger.log(f"Réception du fichier '{filename}' ({filesize} octets) démarrée. Sauvegarde dans {save_path}", "INFO")
+                        # Valider et sécuriser le chemin de sauvegarde
+                        try:
+                            save_path = os.path.abspath(save_path)
+                            save_dir = os.path.dirname(save_path)
+                            if not os.path.isdir(save_dir):
+                                # Tentative de création du répertoire si besoin
+                                os.makedirs(save_dir, exist_ok=True)
+
+                            # Vérifier que le fichier final n'écrase pas un fichier système non désiré
+                            # Forcer le nom de fichier à basename(original) si l'utilisateur a donné un répertoire
+                            # Si l'utilisateur a fourni un chemin complet, on accepte mais on nettoie le nom
+                            final_basename = os.path.basename(filename)
+                            # Si l'utilisateur a choisi un dossier (save_path endswith os.sep ou is dir), remplacer
+                            if os.path.isdir(save_path):
+                                save_path = os.path.join(save_path, final_basename)
+                            # Empêcher path traversal dans le nom fourni
+                            save_path = os.path.abspath(save_path)
+
+                            file_handle = open(save_path, 'wb')
+                            self.receiving_file = {
+                                "name": final_basename,
+                                "size": filesize,
+                                "path": save_path,
+                                "received_bytes": 0,
+                                "file_handle": file_handle
+                            }
+                            self.logger.log(f"Réception du fichier '{final_basename}' ({filesize} octets) démarrée. Sauvegarde dans {save_path}", "INFO")
+                        except Exception as e:
+                            self.logger.log(f"Impossible d'ouvrir le fichier de sauvegarde: {e}", "ERROR")
+                            self.receiving_file = None
                     else:
                         self.logger.log(f"Réception du fichier '{filename}' annulée par l'utilisateur.", "WARNING")
                         self.receiving_file = None # Indique d'ignorer les chunks suivants
@@ -147,5 +166,3 @@ class FileTransferHandler:
             except Exception:
                 pass
             self.receiving_file = None
-
-# Le bloc if __name__ est retiré pour éviter l'exécution lors de l'importation.
