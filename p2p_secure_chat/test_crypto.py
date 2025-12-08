@@ -3,7 +3,7 @@
 import unittest
 import os
 import shutil
-from crypto_handler import CryptoHandler
+from .crypto_handler import CryptoHandler
 
 # Répertoires temporaires pour les tests
 TEST_DIR_A = "test_keys_a"

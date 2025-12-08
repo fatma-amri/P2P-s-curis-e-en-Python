@@ -1,7 +1,7 @@
 import os
 import json
 import threading
-from logger import Logger, MessageType
+from .logger import Logger, MessageType
 
 # Constantes
 MAX_FILE_SIZE = 10 * 1024 * 1024 # 10 MB

@@ -3,8 +3,8 @@ import threading
 import struct
 import time
 import errno
-from logger import Logger, MessageType
-from crypto_handler import CryptoHandler
+from .logger import Logger, MessageType
+from .crypto_handler import CryptoHandler
 
 # Constantes réseau
 HEADER_SIZE = 8 # 4 bytes type + 4 bytes size
@@ -139,6 +139,8 @@ class NetworkHandler:
     def _handle_connection(self, conn, addr):
         """Gère le cycle de vie d'une connexion (handshake et boucle de réception)."""
         try:
+            self.logger.log(f"Démarrage de la gestion de connexion avec {addr[0]}:{addr[1]}", "DEBUG")
+            
             # 1. Handshake cryptographique
             if not self._handshake(conn):
                 self.logger.log("Échec du handshake cryptographique. Fermeture de la connexion.", "ERROR")
@@ -146,15 +148,18 @@ class NetworkHandler:
                 return
 
             self.logger.log("Handshake réussi. Clé de session établie.", "SUCCESS")
+            self.logger.log(f"État de la session: active={self.crypto.is_session_active()}, connecté={self.is_connected}", "DEBUG")
             if self.message_callback:
                 self.message_callback("--- Session sécurisée établie ---", is_system=True)
 
             # 2. Boucle de réception des messages
+            self.logger.log("Démarrage de la boucle de réception des messages", "DEBUG")
             self._receive_loop(conn)
 
         except Exception as e:
             self.logger.log(f"Erreur de gestion de connexion avec {addr[0]}:{addr[1]}: {e}", "ERROR")
         finally:
+            self.logger.log(f"Fin de la gestion de connexion avec {addr[0]}:{addr[1]}", "DEBUG")
             self.close_connection()
 
     def _handshake(self, conn):
@@ -237,15 +242,20 @@ class NetworkHandler:
 
     def _receive_loop(self, conn):
         """Boucle principale de réception et de traitement des messages."""
+        self.logger.log("Entrée dans la boucle de réception", "DEBUG")
+        message_count = 0
+        
         while self.is_connected:
             try:
                 # 1. Réception du header
                 header_data = self._recv_all(conn, HEADER_SIZE)
                 if not header_data:
-                    self.logger.log("Connexion fermée par le pair.", "INFO")
+                    self.logger.log("Connexion fermée par le pair (aucune donnée de header reçue).", "INFO")
                     break
                 
                 msg_type, msg_size = struct.unpack('!II', header_data)
+                message_count += 1
+                self.logger.log(f"Message #{message_count} reçu: type={msg_type}, taille={msg_size}", "DEBUG")
 
                 # Protection contre messages trop grands
                 if msg_size > MessageType.MAX_MESSAGE_SIZE:
@@ -263,11 +273,15 @@ class NetworkHandler:
                 self._process_message(msg_type, encrypted_body)
 
             except socket.timeout:
+                # Timeout est normal, on continue la boucle
                 continue
             except Exception as e:
                 self.logger.log(f"Erreur de réception/traitement: {e}", "ERROR")
+                import traceback
+                self.logger.log(f"Traceback: {traceback.format_exc()}", "DEBUG")
                 break
         
+        self.logger.log(f"Sortie de la boucle de réception (messages traités: {message_count})", "DEBUG")
         self.close_connection()
 
     def _process_message(self, msg_type, encrypted_body):
@@ -300,12 +314,18 @@ class NetworkHandler:
 
     def send_message(self, message_type, data: bytes):
         """Chiffre et envoie un message structuré."""
-        if not self.is_connected or not self.crypto.is_session_active():
-            self.logger.log("Impossible d'envoyer: pas de connexion ou de clé de session active.", "WARNING")
+        if not self.is_connected:
+            self.logger.log("Impossible d'envoyer: pas de connexion active.", "WARNING")
+            return False
+            
+        if not self.crypto.is_session_active():
+            self.logger.log("Impossible d'envoyer: clé de session inactive.", "WARNING")
+            self.logger.log(f"État de la connexion: is_connected={self.is_connected}, peer_socket={self.peer_socket is not None}", "DEBUG")
             return False
 
         try:
             with self.lock:
+                self.logger.log(f"Envoi d'un message de type {message_type}, taille des données: {len(data)} octets", "DEBUG")
                 encrypted_body = self.crypto.encrypt_message(data)
                 msg_size = len(encrypted_body)
                 if msg_size > MessageType.MAX_MESSAGE_SIZE:
@@ -314,6 +334,7 @@ class NetworkHandler:
 
                 header = struct.pack('!II', message_type, msg_size)
                 self.peer_socket.sendall(header + encrypted_body)
+                self.logger.log(f"Message envoyé avec succès (type={message_type}, taille chiffrée={msg_size})", "DEBUG")
                 
                 if message_type == MessageType.TEXT:
                     self.rekey_counter += 1
@@ -336,31 +357,40 @@ class NetworkHandler:
     def close_connection(self):
         """Ferme la connexion et réinitialise l'état."""
         with self.lock:
+            self.logger.log(f"Fermeture de la connexion (is_connected={self.is_connected}, is_listening={self.is_listening})", "DEBUG")
+            
             if self.server_socket:
                 try:
                     self.server_socket.close()
-                except Exception:
-                    pass
+                    self.logger.log("Socket serveur fermé", "DEBUG")
+                except Exception as e:
+                    self.logger.log(f"Erreur lors de la fermeture du socket serveur: {e}", "DEBUG")
                 self.server_socket = None
             
             if self.peer_socket:
                 try:
                     self.peer_socket.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
+                    self.logger.log("Socket pair arrêté (shutdown)", "DEBUG")
+                except Exception as e:
+                    self.logger.log(f"Erreur lors de l'arrêt du socket pair: {e}", "DEBUG")
                 try:
                     self.peer_socket.close()
-                except Exception:
-                    pass
+                    self.logger.log("Socket pair fermé", "DEBUG")
+                except Exception as e:
+                    self.logger.log(f"Erreur lors de la fermeture du socket pair: {e}", "DEBUG")
                 self.peer_socket = None
 
             self.is_listening = False
+            was_connected = self.is_connected
             self.is_connected = False
             self.peer_addr = None
             if self.crypto:
                 self.crypto.clear_session()
+                self.logger.log("Session cryptographique effacée", "DEBUG")
             self.rekey_counter = 0
             if self.status_callback:
                 self.status_callback("Déconnecté")
-            if self.logger:
+            if was_connected:
                 self.logger.log("Connexion fermée.", "INFO")
+            else:
+                self.logger.log("État de connexion réinitialisé.", "DEBUG")
