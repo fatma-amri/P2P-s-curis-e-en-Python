@@ -3,6 +3,7 @@ from tkinter import scrolledtext, simpledialog, filedialog, messagebox
 import threading
 import os
 import time
+from .logger import MessageType
 
 # Définition des couleurs pour l'interface
 COLOR_PRIMARY = "#4CAF50"  # Vert pour les boutons

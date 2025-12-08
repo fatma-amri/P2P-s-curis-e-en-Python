@@ -63,6 +63,9 @@ class NetworkHandler:
             try:
                 self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                # Bind to all interfaces (0.0.0.0) - this is intentional for P2P applications
+                # that need to accept connections from any network interface (local, LAN, etc.)
+                # Security is ensured through cryptographic handshake (X25519 + Ed25519)
                 self.server_socket.bind(('0.0.0.0', try_port))
                 self.server_socket.listen(1)
                 self.is_listening = True

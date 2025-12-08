@@ -6,9 +6,9 @@ import unittest
 import time
 import threading
 import socket
-from p2p_secure_chat.crypto_handler import CryptoHandler
-from p2p_secure_chat.network_handler import NetworkHandler
-from p2p_secure_chat.logger import Logger, MessageType
+from .crypto_handler import CryptoHandler
+from .network_handler import NetworkHandler
+from .logger import Logger, MessageType
 
 
 class TestNetworkConnection(unittest.TestCase):
