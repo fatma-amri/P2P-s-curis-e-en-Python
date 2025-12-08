@@ -238,10 +238,15 @@ class ChatApp(tk.Tk):
                 
                 # Vérifier que chaque octet est dans [0, 255]
                 octets = ip.split('.')
-                for octet in octets:
-                    if not (0 <= int(octet) <= 255):
-                        messagebox.showerror("Erreur de connexion", "Adresse IP invalide (octets doivent être entre 0 et 255).")
-                        return
+                try:
+                    for octet in octets:
+                        octet_val = int(octet)
+                        if not (0 <= octet_val <= 255):
+                            messagebox.showerror("Erreur de connexion", "Adresse IP invalide (octets doivent être entre 0 et 255).")
+                            return
+                except ValueError:
+                    messagebox.showerror("Erreur de connexion", "Adresse IP invalide (octets doivent être numériques).")
+                    return
                 
                 # Valider le port
                 try:

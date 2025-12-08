@@ -245,8 +245,10 @@ class NetworkHandler:
                     break
                 
                 if msg_size == 0:
-                    self.logger.log("Taille de message nulle reçue", "WARNING")
-                    # Pour FILE_END, la taille peut être 0, donc on continue
+                    # Seul FILE_END peut avoir une taille de 0
+                    if msg_type != MessageType.FILE_END:
+                        self.logger.log(f"Taille de message nulle reçue pour type {msg_type}", "WARNING")
+                        break
                     encrypted_body = b''
                 else:
                     # 3. Réception du corps du message
