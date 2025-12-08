@@ -1,9 +1,8 @@
-# p2p_secure_chat/network_handler.py
-
 import socket
 import threading
 import struct
 import time
+import errno
 from logger import Logger, MessageType
 from crypto_handler import CryptoHandler
 
@@ -11,6 +10,7 @@ from crypto_handler import CryptoHandler
 HEADER_SIZE = 8 # 4 bytes type + 4 bytes size
 MAX_FILE_SIZE = 10 * 1024 * 1024 # 10 MB
 RECV_BUFFER_SIZE = 4096
+RECV_SOCKET_TIMEOUT = 5.0  # seconds
 
 class NetworkHandler:
     """
@@ -48,17 +48,23 @@ class NetworkHandler:
             self.server_socket.bind(('0.0.0.0', port))
             self.server_socket.listen(1)
             self.is_listening = True
-            self.status_callback("Écoute sur le port " + str(port))
+            if self.status_callback:
+                self.status_callback("Écoute sur le port " + str(port))
             self.logger.log(f"Démarrage de l'écoute sur le port {port}...", "INFO")
             
             threading.Thread(target=self._listen_loop, daemon=True).start()
         except Exception as e:
             self.logger.log(f"Erreur lors du démarrage de l'écoute: {e}", "ERROR")
-            self.status_callback("Erreur d'écoute")
+            if self.status_callback:
+                self.status_callback("Erreur d'écoute")
             self.close_connection()
 
     def _listen_loop(self):
         """Boucle d'écoute du serveur pour accepter les connexions entrantes."""
+        if not self.server_socket:
+            self.is_listening = False
+            return
+
         while self.is_listening:
             try:
                 self.server_socket.settimeout(1) # Timeout pour permettre l'arrêt propre
@@ -74,12 +80,23 @@ class NetworkHandler:
                 self.peer_socket = conn
                 self.peer_addr = addr
                 self.is_connected = True
-                self.status_callback(f"Connecté à {addr[0]}:{addr[1]}")
+                if self.status_callback:
+                    self.status_callback(f"Connecté à {addr[0]}:{addr[1]}")
                 
+                # Set timeout for peer socket recv
+                try:
+                    self.peer_socket.settimeout(RECV_SOCKET_TIMEOUT)
+                except Exception:
+                    pass
+
                 # Démarrer le thread de gestion de la connexion
                 threading.Thread(target=self._handle_connection, args=(conn, addr), daemon=True).start()
-                self.is_listening = False # Arrêter l'écoute après la connexion
-                self.server_socket.close()
+                # Arrêter l'écoute après la connexion
+                self.is_listening = False
+                try:
+                    self.server_socket.close()
+                except Exception:
+                    pass
                 self.server_socket = None
 
             except socket.timeout:
@@ -98,21 +115,25 @@ class NetworkHandler:
             return
 
         self.logger.log(f"Tentative de connexion à {ip}:{port}...", "INFO")
-        self.status_callback(f"Connexion à {ip}:{port}...")
+        if self.status_callback:
+            self.status_callback(f"Connexion à {ip}:{port}...")
         
         try:
             self.peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.peer_socket.settimeout(RECV_SOCKET_TIMEOUT)
             self.peer_socket.connect((ip, port))
             self.peer_addr = (ip, port)
             self.is_connected = True
-            self.status_callback(f"Connecté à {ip}:{port}")
+            if self.status_callback:
+                self.status_callback(f"Connecté à {ip}:{port}")
             
             # Démarrer le thread de gestion de la connexion
             threading.Thread(target=self._handle_connection, args=(self.peer_socket, self.peer_addr), daemon=True).start()
 
         except Exception as e:
             self.logger.log(f"Échec de la connexion à {ip}:{port}: {e}", "ERROR")
-            self.status_callback("Déconnecté")
+            if self.status_callback:
+                self.status_callback("Déconnecté")
             self.close_connection()
 
     def _handle_connection(self, conn, addr):
@@ -125,7 +146,8 @@ class NetworkHandler:
                 return
 
             self.logger.log("Handshake réussi. Clé de session établie.", "SUCCESS")
-            self.message_callback("--- Session sécurisée établie ---", is_system=True)
+            if self.message_callback:
+                self.message_callback("--- Session sécurisée établie ---", is_system=True)
 
             # 2. Boucle de réception des messages
             self._receive_loop(conn)
@@ -164,6 +186,11 @@ class NetworkHandler:
                 self.logger.log(f"Handshake échoué: type de message inattendu ({msg_type}).", "ERROR")
                 return False
 
+            # Sécurité: vérifier la taille raisonnable du bundle
+            if msg_size > MessageType.MAX_MESSAGE_SIZE:
+                self.logger.log(f"Handshake échoué: bundle trop grand ({msg_size}).", "ERROR")
+                return False
+
             # Réception du bundle du pair
             bundle_data = self._recv_all(conn, msg_size)
             if not bundle_data:
@@ -190,10 +217,19 @@ class NetworkHandler:
             return False
 
     def _recv_all(self, conn, n):
-        """Reçoit exactement n octets du socket."""
+        """Reçoit exactement n octets du socket (avec timeout global de lecture)."""
         data = b''
+        end_time = time.time() + (RECV_SOCKET_TIMEOUT * 2)
         while len(data) < n:
-            packet = conn.recv(n - len(data))
+            remaining = n - len(data)
+            try:
+                packet = conn.recv(remaining)
+            except socket.timeout:
+                if time.time() > end_time:
+                    return None
+                continue
+            except Exception:
+                return None
             if not packet:
                 return None
             data += packet
@@ -210,6 +246,12 @@ class NetworkHandler:
                     break
                 
                 msg_type, msg_size = struct.unpack('!II', header_data)
+
+                # Protection contre messages trop grands
+                if msg_size > MessageType.MAX_MESSAGE_SIZE:
+                    self.logger.log(f"Message rejeté: taille {msg_size} > {MessageType.MAX_MESSAGE_SIZE}", "WARNING")
+                    self.close_connection()
+                    break
 
                 # 2. Réception du corps du message
                 encrypted_body = self._recv_all(conn, msg_size)
@@ -234,19 +276,19 @@ class NetworkHandler:
             if msg_type == MessageType.TEXT:
                 plaintext_bytes = self.crypto.decrypt_message(encrypted_body)
                 message = plaintext_bytes.decode('utf-8')
-                self.message_callback(message, is_system=False)
+                if self.message_callback:
+                    self.message_callback(message, is_system=False)
                 self.rekey_counter += 1
                 self._check_rekey()
 
             elif msg_type in [MessageType.FILE_START, MessageType.FILE_CHUNK, MessageType.FILE_END]:
-                # Le corps du message est déjà déchiffré
                 plaintext_bytes = self.crypto.decrypt_message(encrypted_body)
-                self.file_transfer_handler.handle_incoming_message(msg_type, plaintext_bytes)
+                if self.file_transfer_handler:
+                    self.file_transfer_handler.handle_incoming_message(msg_type, plaintext_bytes)
                 self.rekey_counter += 1
                 self._check_rekey()
             
             elif msg_type == MessageType.REKEY:
-                # Le pair demande un rekeying
                 self.logger.log("Demande de rekeying reçue. (Non implémenté)", "WARNING")
                 pass
 
@@ -264,14 +306,13 @@ class NetworkHandler:
 
         try:
             with self.lock:
-                # 1. Chiffrement du corps
                 encrypted_body = self.crypto.encrypt_message(data)
-                
-                # 2. Construction du header
                 msg_size = len(encrypted_body)
+                if msg_size > MessageType.MAX_MESSAGE_SIZE:
+                    self.logger.log(f"Message trop grand pour envoi: {msg_size} > {MessageType.MAX_MESSAGE_SIZE}", "ERROR")
+                    return False
+
                 header = struct.pack('!II', message_type, msg_size)
-                
-                # 3. Envoi
                 self.peer_socket.sendall(header + encrypted_body)
                 
                 if message_type == MessageType.TEXT:
@@ -304,6 +345,10 @@ class NetworkHandler:
             
             if self.peer_socket:
                 try:
+                    self.peer_socket.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
                     self.peer_socket.close()
                 except Exception:
                     pass
@@ -312,9 +357,10 @@ class NetworkHandler:
             self.is_listening = False
             self.is_connected = False
             self.peer_addr = None
-            self.crypto.clear_session()
+            if self.crypto:
+                self.crypto.clear_session()
             self.rekey_counter = 0
-            self.status_callback("Déconnecté")
-            self.logger.log("Connexion fermée.", "INFO")
-
-# Le bloc if __name__ est retiré pour éviter l'exécution lors de l'importation.
+            if self.status_callback:
+                self.status_callback("Déconnecté")
+            if self.logger:
+                self.logger.log("Connexion fermée.", "INFO")
