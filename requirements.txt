@@ -1,0 +1,5 @@
+cryptography
+# Tkinter est généralement inclus dans l'installation standard de Python,
+# mais il est listé pour la clarté.
+# Si l'utilisateur est sur Linux, il pourrait avoir besoin d'installer le paquet python3-tk.
+# python3-tk
