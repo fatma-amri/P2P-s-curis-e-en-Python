@@ -3,7 +3,7 @@
 import unittest
 import os
 import shutil
-from crypto_handler import CryptoHandler
+from .crypto_handler import CryptoHandler
 
 # Répertoires temporaires pour les tests
 TEST_DIR_A = "test_keys_a"
@@ -140,6 +140,4 @@ class TestCryptoHandler(unittest.TestCase):
             self.crypto_b.decrypt_message(tampered_message)
 
 if __name__ == '__main__':
-    # Changer le répertoire de travail pour que les fichiers de clés soient créés dans TEST_DIR
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
     unittest.main()

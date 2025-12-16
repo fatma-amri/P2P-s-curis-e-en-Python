@@ -16,18 +16,19 @@ Ceci est une application de messagerie Peer-to-Peer (P2P) sécurisée développ�
 
 ## Structure du Projet
 
-Le projet est organisé en modules pour une meilleure maintenabilité :
+Le projet est organisé en modules dans le package `p2p_secure_chat` pour une meilleure maintenabilité :
 
 | Fichier | Description |
 | :--- | :--- |
 | `main.py` | Point d'entrée de l'application, initialise et connecte tous les modules. |
-| `crypto_handler.py` | Gestion de la cryptographie (génération de clés, handshake, chiffrement/déchiffrement). |
-| `network_handler.py` | Gestion des connexions réseau (écoute, connexion, envoi/réception de paquets). |
-| `file_transfer.py` | Logique d'envoi et de réception de fichiers par morceaux. |
-| `gui.py` | Implémentation de l'interface graphique Tkinter. |
-| `logger.py` | Module de journalisation simple avec support pour la GUI. |
+| `p2p_secure_chat/` | Package principal contenant tous les modules |
+| `p2p_secure_chat/crypto_handler.py` | Gestion de la cryptographie (génération de clés, handshake, chiffrement/déchiffrement). |
+| `p2p_secure_chat/network_handler.py` | Gestion des connexions réseau (écoute, connexion, envoi/réception de paquets). |
+| `p2p_secure_chat/file_transfer.py` | Logique d'envoi et de réception de fichiers par morceaux. |
+| `p2p_secure_chat/gui.py` | Implémentation de l'interface graphique Tkinter. |
+| `p2p_secure_chat/logger.py` | Module de journalisation simple avec support pour la GUI. |
+| `p2p_secure_chat/test_crypto.py` | Tests unitaires pour les fonctions cryptographiques. |
 | `requirements.txt` | Liste des dépendances Python. |
-| `test_crypto.py` | Tests unitaires pour les fonctions cryptographiques. |
 
 ## Installation
 
@@ -96,7 +97,7 @@ L'application fonctionne en mode P2P. Un utilisateur doit démarrer l'écoute (m
 Pour vérifier le bon fonctionnement des fonctions cryptographiques, exécutez les tests unitaires :
 
 ```bash
-python3 -m unittest test_crypto.py
+python3 -m unittest p2p_secure_chat.test_crypto
 ```
 
 Tous les tests devraient passer (`OK`).

@@ -8,11 +8,11 @@ import time
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from crypto_handler import CryptoHandler
-from network_handler import NetworkHandler
-from file_transfer import FileTransferHandler
-from logger import Logger
-from gui import ChatApp
+from p2p_secure_chat.crypto_handler import CryptoHandler
+from p2p_secure_chat.network_handler import NetworkHandler
+from p2p_secure_chat.file_transfer import FileTransferHandler
+from p2p_secure_chat.logger import Logger
+from p2p_secure_chat.gui import ChatApp
 
 def main():
     """
